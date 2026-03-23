@@ -1,0 +1,38 @@
+# Байт-код Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Виртуальное окружение
+venv/
+ENV/
+env/
+.env
+
+# Данные и логи (чтобы не забить гит сырыми данными)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+*.log
+
+# Модели и веса (ОЧЕНЬ ВАЖНО: веса BERT весят 400МБ+, их нельзя в гит)
+models/*
+!models/.gitkeep
+*.bin
+*.pt
+*.pth
+*.h5
+
+# Настройки VS Code / PyCharm
+.vscode/
+.idea/
+
+# Специфично для Windows
+Thumbs.db
+desktop.ini
+
+# Файлы сборки и дистрибутивы
+dist/
+build/
+*.egg-info/
