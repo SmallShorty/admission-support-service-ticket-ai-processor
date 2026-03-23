@@ -3,12 +3,16 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
+os.environ["HF_HUB_OFFLINE"] = "1"
+
 
 class Settings(BaseSettings):
     # Базовые настройки
     MODEL_NAME: str = "facebook/bart-large-mnli"
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "ticket-classifier-model"
+
+    HF_HUB_OFFLINE: bool = True
 
     # Путь к файлу с категориями (относительно корня проекта)
     CATEGORIES_FILE: Path = Path(__file__).parent / "categories.json"
