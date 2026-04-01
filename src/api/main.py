@@ -1,7 +1,7 @@
 import logging
 import warnings
 from fastapi import FastAPI
-from src.api.routes import classification
+from src.api.routes import routers
 from src.api.middleware import setup_cors
 from src.core.config import settings
 
@@ -21,9 +21,9 @@ def create_app() -> FastAPI:
     setup_cors(app)
 
     # Include routers
-    app.include_router(
-        classification.router, prefix=settings.API_V1_STR, tags=["Classification"]
-    )
+    for router, tag in routers:
+        app.include_router(router, prefix=settings.API_V1_STR, tags=[tag])
+        logger.info(f"Mounted router: {tag}")
 
     @app.get("/health", tags=["System"])
     async def health_check():
@@ -43,4 +43,14 @@ async def on_startup():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("src.api.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(
+        "src.api.main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True,
+        reload_dirs=["src"],  # Отслеживаем только src
+        reload_excludes=[".venv", "__pycache__", "*.pyc", "logs", "data", "models"],
+        log_level="info",
+        access_log=False,  # Отключаем access логи для скорости
+        use_colors=True,
+    )
