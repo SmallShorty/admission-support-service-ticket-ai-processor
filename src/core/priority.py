@@ -1,5 +1,6 @@
 # src/core/priority.py
-from typing import Optional, Dict, Any
+from typing import Optional
+from random import randrange
 
 # Веса категорий на основе Wintent из вашей таблицы
 CATEGORY_WEIGHTS = {
@@ -46,6 +47,8 @@ def calculate_priority(
         # Уверенность 0-1, добавляем от -10 до +10
         confidence_modifier = (confidence - 0.5) * 20
         priority += confidence_modifier
+
+    priority += randrange(50)
 
     # Ограничиваем от 0 до 100
     priority = max(0, min(100, priority))
