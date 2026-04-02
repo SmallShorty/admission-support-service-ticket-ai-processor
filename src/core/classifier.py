@@ -1,7 +1,6 @@
-# src/core/classifier.py
 import logging
 from typing import Optional, Dict, Any
-from functools import lru_cache
+import torch
 from transformers import pipeline
 from .config import settings
 
@@ -36,15 +35,13 @@ class TicketClassifier:
     def classifier(self):
         """Ленивая загрузка модели при первом обращении"""
         if self._classifier is None:
-            logger.info(
-                f"Loading model {settings.MODEL_NAME} (this may take a while)..."
-            )
+            logger.info(f"Loading model {settings.MODEL_NAME}...")
+
             self._classifier = pipeline(
                 "zero-shot-classification",
                 model=settings.MODEL_NAME,
-                device=0,  # -1 для CPU, 0 для GPU
+                device=-1,
             )
-            logger.info("Model loaded successfully!")
         return self._classifier
 
     def predict(self, text: str) -> Dict[str, Any]:
