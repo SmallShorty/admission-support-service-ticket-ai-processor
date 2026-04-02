@@ -37,11 +37,18 @@ class TicketClassifier:
         if self._classifier is None:
             logger.info(f"Loading model {settings.MODEL_NAME}...")
 
+            device = 0 if torch.cuda.is_available() else -1
+
             self._classifier = pipeline(
                 "zero-shot-classification",
                 model=settings.MODEL_NAME,
-                device=-1,
+                device=device,
+                torch_dtype=torch.float16 if device == 0 else torch.float32,
+                batch_size=8,
             )
+
+            if device == 0:
+                logger.info(f"Model loaded on GPU: {torch.cuda.get_device_name(0)}")
         return self._classifier
 
     def predict(self, text: str) -> Dict[str, Any]:
@@ -51,9 +58,13 @@ class TicketClassifier:
         """
         try:
             # Отправляем текст и список описаний из конфига
-            result = self.classifier(
-                text, candidate_labels=settings.TICKET_LABELS, multi_label=False
-            )
+            with torch.autocast(
+                device_type="cuda" if torch.cuda.is_available() else "cpu",
+                enabled=torch.cuda.is_available(),
+            ):
+                result = self.classifier(
+                    text, candidate_labels=settings.TICKET_LABELS, multi_label=False
+                )
 
             best_desc = result["labels"][0]
             category_id = self.desc_to_id.get(best_desc)
