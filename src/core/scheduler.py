@@ -14,7 +14,7 @@ Hardcoded defaults (overridable via .env):
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 try:
@@ -111,22 +111,43 @@ async def run_recalculation() -> int:
         return len(updates)
 
 
+def _seconds_until_next_tick(interval_minutes: int) -> float:
+    """
+    Return seconds until the next wall-clock boundary aligned to interval_minutes.
+    Example: interval=30, current time 14:07:22 → sleeps until 14:30:00 (1358s).
+    """
+    now = datetime.now(timezone.utc)
+    total_minutes = now.hour * 60 + now.minute
+    minutes_into_slot = total_minutes % interval_minutes
+    minutes_to_wait = interval_minutes - minutes_into_slot
+    seconds_to_wait = minutes_to_wait * 60 - now.second - now.microsecond / 1_000_000
+    # Guard against sub-second drift landing exactly on a boundary
+    return seconds_to_wait if seconds_to_wait > 1 else seconds_to_wait + interval_minutes * 60
+
+
 async def priority_scheduler_loop() -> None:
     """
-    Asyncio task that fires run_recalculation() on a fixed interval.
-    Skipped entirely outside the RECALC_HOUR_START–RECALC_HOUR_END window.
+    Asyncio task that fires run_recalculation() aligned to wall-clock boundaries.
+
+    Sleeps until the next :00 or :30 mark (for a 30-min interval), then checks
+    whether the current local time falls inside the working window before running.
+    This mirrors cron behaviour — the job always fires at predictable times.
     """
     tz = ZoneInfo(settings.RECALC_TIMEZONE)
-    interval_seconds = settings.RECALC_INTERVAL_MINUTES * 60
 
     logger.info(
-        f"Priority scheduler started — every {settings.RECALC_INTERVAL_MINUTES} min, "
+        f"Priority scheduler started — every {settings.RECALC_INTERVAL_MINUTES} min "
+        f"at wall-clock boundaries, "
         f"{settings.RECALC_HOUR_START:02d}:00–{settings.RECALC_HOUR_END:02d}:00 "
         f"{settings.RECALC_TIMEZONE}"
     )
 
     while True:
-        await asyncio.sleep(interval_seconds)
+        sleep_seconds = _seconds_until_next_tick(settings.RECALC_INTERVAL_MINUTES)
+        next_tick = datetime.now(tz) + timedelta(seconds=sleep_seconds)
+        logger.debug(f"Next recalculation tick at {next_tick.strftime('%H:%M:%S %Z')}")
+
+        await asyncio.sleep(sleep_seconds)
 
         if not _is_within_recalc_window(tz):
             logger.debug("Recalculation skipped: outside working window")
