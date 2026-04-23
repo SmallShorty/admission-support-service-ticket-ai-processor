@@ -1,9 +1,9 @@
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from src.api.schemas import PriorityRequest, PriorityResponse
-from src.core.priority import calculate_priority, CATEGORY_WEIGHTS
+from src.core.priority import calculate_priority
 
-# Specific logger for priority routes
 logger = logging.getLogger("api.priority")
 router = APIRouter()
 
@@ -11,50 +11,41 @@ router = APIRouter()
 @router.post(
     "/priority",
     response_model=PriorityResponse,
-    summary="Calculate priority for a category",
-    description="Calculates priority based on category and confidence.",
+    summary="Calculate priority for a ticket",
+    description="Calculates priority using topic weight, student status bonuses, and wait time.",
 )
 async def calculate_ticket_priority(request: PriorityRequest):
-    """
-    Calculate priority for a given category.
-
-    - **category**: Category slug (e.g., 'tech_issue', 'finance_contracts')
-    - **confidence**: Model confidence score (0-1) - optional
-    """
     try:
         logger.info(
-            f"Processing priority calculation for category: {request.category}, "
-            f"confidence: {request.confidence}"
+            f"Priority request: category={request.category}, confidence={request.confidence}"
         )
 
-        # Проверяем существование категории
-        if request.category not in CATEGORY_WEIGHTS:
-            available_categories = ", ".join(list(CATEGORY_WEIGHTS.keys()))
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown category: '{request.category}'. "
-                f"Available categories: {available_categories}",
-            )
-
-        # Рассчитываем приоритет
-        priority = calculate_priority(
-            category=request.category,
+        now = datetime.now(timezone.utc)
+        result = calculate_priority(
+            category=request.category.value,
             confidence=request.confidence,
+            created_at=request.created_at,
+            has_bvi=request.student.has_bvi,
+            has_special_quota=request.student.has_special_quota,
+            has_target_quota=request.student.has_target_quota,
+            has_separate_quota=request.student.has_separate_quota,
+            has_priority_right=request.student.has_priority_right,
+            original_submitted=request.student.original_submitted,
+            score=request.student.score,
+            now=now,
         )
 
-        logger.info(f"Priority calculated: {priority} for category: {request.category}")
+        logger.info(f"Priority={result['priority']} for category={request.category}")
 
         return PriorityResponse(
             category=request.category,
-            priority=priority,
-            base_weight=CATEGORY_WEIGHTS[request.category],
+            priority=result["priority"],
+            breakdown=result["breakdown"],
+            recalculated_at=now,
         )
 
-    except HTTPException:
-        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Priority calculation error: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error occurred during priority calculation: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail="Error occurred during priority calculation.")

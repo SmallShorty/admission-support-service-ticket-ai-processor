@@ -1,7 +1,9 @@
+import json
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any
 import torch
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -28,12 +30,43 @@ class TicketClassifier:
 
         self._initialized = True
         self._classifier = None  # Модель будет загружена лениво
+        self._ft_tokenizer = None
+        self._ft_model = None
+        self._ft_label_map: Dict[int, str] = {}
         self.desc_to_id = {v: k for k, v in settings.CATEGORIES_DATA.items()}
         logger.info("TicketClassifier instance created (model not loaded yet)")
 
+    def _load_fine_tuned(self):
+        """Ленивая загрузка дообученной модели"""
+        model_path = Path(settings.FINE_TUNED_MODEL_PATH)
+        label_map_path = model_path / "label_map.json"
+
+        logger.info(f"Загрузка дообученной модели из {model_path}...")
+        self._ft_tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+        self._ft_model = AutoModelForSequenceClassification.from_pretrained(
+            str(model_path)
+        )
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._ft_model = self._ft_model.to(device)
+        self._ft_model.eval()
+
+        if label_map_path.exists():
+            with open(label_map_path, "r", encoding="utf-8") as f:
+                slug_to_idx: Dict[str, int] = json.load(f)
+                self._ft_label_map = {v: k for k, v in slug_to_idx.items()}
+        else:
+            # Fallback: порядок совпадает с TICKET_SLUGS
+            self._ft_label_map = {i: slug for i, slug in enumerate(settings.TICKET_SLUGS)}
+
+        if torch.cuda.is_available():
+            logger.info(f"Дообученная модель загружена на GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            logger.info("Дообученная модель загружена на CPU")
+
     @property
     def classifier(self):
-        """Ленивая загрузка модели при первом обращении"""
+        """Ленивая загрузка zero-shot модели при первом обращении"""
         if self._classifier is None:
             logger.info(f"Loading model {settings.MODEL_NAME}...")
 
@@ -51,13 +84,46 @@ class TicketClassifier:
                 logger.info(f"Model loaded on GPU: {torch.cuda.get_device_name(0)}")
         return self._classifier
 
+    def _predict_fine_tuned(self, text: str) -> Dict[str, Any]:
+        """Инференс через дообученную модель"""
+        if self._ft_model is None:
+            self._load_fine_tuned()
+
+        device = next(self._ft_model.parameters()).device
+        inputs = self._ft_tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True,
+        )
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            logits = self._ft_model(**inputs).logits
+
+        probs = torch.softmax(logits, dim=-1)[0]
+        best_idx = int(probs.argmax())
+        confidence = round(float(probs[best_idx]), 4)
+        category = self._ft_label_map.get(best_idx, "GENERAL_INFO")
+
+        return {
+            "category": category,
+            "confidence": confidence,
+            "original_description": settings.CATEGORIES_DATA.get(category, ""),
+        }
+
     def predict(self, text: str) -> Dict[str, Any]:
         """
         Предсказание категории текста.
         Модель загружается только при первом вызове этого метода.
+        Если USE_FINE_TUNED_MODEL=True и путь указан — используется дообученная модель.
         """
         try:
-            # Отправляем текст и список описаний из конфига
+            if settings.USE_FINE_TUNED_MODEL and settings.FINE_TUNED_MODEL_PATH:
+                return self._predict_fine_tuned(text)
+
+            # Zero-shot путь (по умолчанию)
             with torch.autocast(
                 device_type="cuda" if torch.cuda.is_available() else "cpu",
                 enabled=torch.cuda.is_available(),
@@ -80,18 +146,29 @@ class TicketClassifier:
 
     def is_model_loaded(self) -> bool:
         """Проверка, загружена ли модель"""
+        if settings.USE_FINE_TUNED_MODEL and settings.FINE_TUNED_MODEL_PATH:
+            return self._ft_model is not None
         return self._classifier is not None
 
     def unload_model(self):
         """Выгрузка модели для освобождения памяти (опционально)"""
+        import gc
+
         if self._classifier is not None:
-            logger.info("Unloading model...")
+            logger.info("Unloading zero-shot model...")
             del self._classifier
             self._classifier = None
-            import gc
-
             gc.collect()
-            logger.info("Model unloaded")
+
+        if self._ft_model is not None:
+            logger.info("Выгрузка дообученной модели...")
+            del self._ft_model
+            del self._ft_tokenizer
+            self._ft_model = None
+            self._ft_tokenizer = None
+            gc.collect()
+
+        logger.info("Model unloaded")
 
 
 # Глобальный экземпляр (синглтон)
