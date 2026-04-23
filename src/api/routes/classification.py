@@ -1,9 +1,8 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from src.api.schemas import ClassificationRequest, ClassificationResponse
-from src.core.classifier import model_instance
+from src.core.queues import classification_queue
 
-# Specific logger for classification routes
 logger = logging.getLogger("api.classification")
 router = APIRouter()
 
@@ -21,7 +20,7 @@ async def classify_ticket(request: ClassificationRequest):
     try:
         logger.info(f"Processing classification for text length: {len(request.text)}")
 
-        prediction = model_instance.predict(request.text)
+        prediction = await classification_queue.enqueue(request.text)
 
         logger.info(f"Task completed. Slug: {prediction['category']}")
 

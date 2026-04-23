@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from src.api.routes import routers
 from src.api.middleware import setup_cors
 from src.core.config import settings
+from src.core.queues import classification_queue
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -37,7 +38,14 @@ app = create_app()
 
 @app.on_event("startup")
 async def on_startup():
+    await classification_queue.start()
     logger.info("Application startup sequence completed.")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await classification_queue.stop()
+    logger.info("Application shutdown sequence completed.")
 
 
 if __name__ == "__main__":

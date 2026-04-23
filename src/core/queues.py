@@ -3,6 +3,7 @@ import logging
 from typing import List, Any, Dict
 from .queue_manager import BatchQueue, QueueType
 from .classifier import model_instance
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -268,3 +269,11 @@ class SNILSQueue(BatchQueue):
         self.redis_client = redis_client
         self.nest_client = nest_client
         logger.info("Клиенты установлены для очереди SNILS")
+
+
+# Глобальный экземпляр очереди классификации
+classification_queue = ClassificationQueue(
+    batch_size=settings.CLASSIFY_BATCH_SIZE,
+    max_wait_ms=settings.CLASSIFY_MAX_WAIT_MS,
+    worker_count=settings.CLASSIFY_WORKER_COUNT,
+)

@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT_MS: int = 500
     DEFAULT_APPLICANT_DATA_TTL: int = 60 * 1  # 5 минут для данных по умолчанию
 
+    # Настройки дообученной модели
+    USE_FINE_TUNED_MODEL: bool = False
+    FINE_TUNED_MODEL_PATH: Optional[str] = None  # например, "models/rubert-ticket-classifier"
+
     # Настройки логирования
     LOG_LEVEL: str = "INFO"
     ENABLE_QUEUE_METRICS: bool = True
