@@ -1,28 +1,42 @@
 import os
 import json
-import random
 import time
+import random
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import requests
 
 load_dotenv()
 api_key = os.getenv("DEEPSEEK_API_KEY")
 
-if not api_key:
-    raise ValueError("DEEPSEEK_API_KEY не найден в .env")
+MAX_RETRIES = 3
+RETRY_DELAY = 2.0
+
+# Вариации контекста обращения — варьируют структуру и детали, не тон персоны
+PROMPT_VARIATIONS = [
+    "Укажи конкретную дату или дедлайн в тексте обращения.",
+    "Упомяни, что абитуриент уже пробовал решить проблему самостоятельно — безуспешно.",
+    "Добавь уточняющий вопрос в конце обращения.",
+    "Включи конкретную деталь: номер документа, дату подачи или название программы.",
+    "Напиши кратко — только суть проблемы, без лишних деталей.",
+    "Добавь контекст: откуда абитуриент и на какую программу поступает.",
+    "Упомяни предыдущее взаимодействие с приёмной комиссией (звонок, визит, письмо).",
+]
 
 
 class DeepSeekDatasetGenerator:
     def __init__(self, personas_path: str, taxonomy_path: str):
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY не найден в .env")
+
         self.personas = self._load_json(personas_path)
         self.categories = self._load_json(taxonomy_path)
-        
-        # DeepSeek API endpoint
+
         self.api_url = "https://api.deepseek.com/v1/chat/completions"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
     def _load_json(self, path: str) -> List[Dict]:
@@ -44,24 +58,26 @@ class DeepSeekDatasetGenerator:
         return category
 
     def _generate_ticket(self, persona: Dict, category: Dict) -> Optional[Dict]:
-        """Приватный метод для обращения к DeepSeek API"""
+        variation = random.choice(PROMPT_VARIATIONS)
         prompt = f"""
         Ты — эксперт Admission Support Service. Напиши текст обращения.
-        
+
         КТО ПИШЕТ: {persona['name']}
         ОПИСАНИЕ: {persona['settings']['description']}
         СТИЛЬ: {persona['settings']['style']}
         ТОН: {persona['settings']['tone']}
-        
+
         ТЕМА: {category['name_ru']} ({category['description']})
-        
+
+        ФОРМАТ ПОДАЧИ: {variation}
+
         ОГРАНИЧЕНИЯ:
         - ЗАПРЕЩЕНО: эмодзи, сокращение "ASS".
         - Язык: Русский.
         - Не называй категорию прямо.
         - Текст должен быть реалистичным и соответствовать стилю и тону персоны.
         - Длина: 2-5 предложений.
-        
+
         ВЕРНИ ТОЛЬКО JSON ОБЪЕКТ без дополнительного текста:
         {{
             "persona_id": "{persona['id']}",
@@ -80,27 +96,37 @@ class DeepSeekDatasetGenerator:
             "max_tokens": 500
         }
         
-        try:
-            response = requests.post(self.api_url, headers=self.headers, json=payload)
-            response.raise_for_status()
-            
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            
-            # Извлекаем JSON из ответа (может быть обернут в markdown)
-            content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            if content.startswith("```"):
-                content = content[3:]
-                
-            return json.loads(content.strip())
-        except Exception as e:
-            print(f"Ошибка [Persona {persona['id']}, Category {category['id']}]: {e}")
-            print(f"Ответ API: {response.text if 'response' in locals() else 'Нет ответа'}")
-            return None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
+                response.raise_for_status()
+
+                content = response.json()["choices"][0]["message"]["content"].strip()
+
+                # Убираем markdown-обёртку ```json ... ```
+                if content.startswith("```"):
+                    content = content.split("```", 2)[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+
+                return json.loads(content.strip())
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    wait = RETRY_DELAY * (2 ** attempt)
+                    print(f"  Rate limit, ждём {wait:.0f}с...")
+                    time.sleep(wait)
+                elif attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print(f"  ✗ HTTP ошибка [{persona['id']}/{category['id']}]: {e}")
+                    return None
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print(f"  ✗ Ошибка [{persona['id']}/{category['id']}]: {e}")
+                    return None
+        return None
 
     def create_custom_batch(self, persona_id: str, category_id: str, count: int):
         """Генерация конкретного набора данных"""
@@ -113,43 +139,79 @@ class DeepSeekDatasetGenerator:
         )
 
         for i in range(count):
-            print(f"Генерация {i+1}/{count}...")
             sample = self._generate_ticket(persona, category)
             if sample:
                 batch.append(sample)
-                print(f"✓ Сгенерировано: {sample['ticket_text'][:50]}...")
+                print(f"  {i+1}/{count} ✓ {sample['ticket_text'][:50]}...")
             else:
-                print(f"✗ Ошибка генерации")
-            time.sleep(1)  # Пауза для лимитов API
+                print(f"  {i+1}/{count} ✗")
+            time.sleep(0.5)
 
         self._save(batch, f"deepseek_{persona_id}_{category_id}")
         return batch
 
-    def generate_full_dataset(self, samples_per_combination: int = 2):
-        """Генерация полного датасета для всех комбинаций персон и категорий"""
-        all_data = []
-        
-        for persona in self.personas:
-            for category in self.categories:
-                print(f"\n{'='*60}")
-                print(f"Генерация для: {persona['name']} -> {category['name_ru']}")
-                print(f"{'='*60}")
-                
-                batch = []
-                for i in range(samples_per_combination):
-                    print(f"  Образец {i+1}/{samples_per_combination}...")
-                    sample = self._generate_ticket(persona, category)
-                    if sample:
-                        batch.append(sample)
-                        print(f"  ✓ Успешно")
-                    else:
-                        print(f"  ✗ Ошибка")
-                    time.sleep(1)
-                
-                all_data.extend(batch)
-        
-        self._save(all_data, f"full_dataset_{samples_per_combination}_per_combo")
+    def generate_full_dataset(self, samples_per_combination: int = 10, max_workers: int = 4) -> List[Dict]:
+        """
+        Генерация полного датасета параллельно.
+        Поддерживает resume — пропускает уже сгенерированные комбинации.
+        """
+        combinations = [
+            (persona, category)
+            for persona in self.personas
+            for category in self.categories
+        ]
+        total = len(combinations)
+        done_keys = self._load_done_keys()
+        print(f"Всего комбинаций: {total} ({total * samples_per_combination} образцов)")
+        print(f"Уже готово: {len(done_keys)}, осталось: {total - len(done_keys)}")
+
+        all_data: List[Dict] = []
+
+        def generate_combo(persona: Dict, category: Dict) -> List[Dict]:
+            key = f"deepseek_{persona['id']}_{category['id']}"
+            if key in done_keys:
+                return []
+            results = []
+            for _ in range(samples_per_combination):
+                sample = self._generate_ticket(persona, category)
+                if sample:
+                    results.append(sample)
+                time.sleep(0.3)
+            if results:
+                self._save(results, key)
+            status = f"{len(results)}/{samples_per_combination}"
+            print(f"  {'✓' if results else '✗'} {persona['name']} → {category['name_ru']}: {status}")
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(generate_combo, p, c): (p, c)
+                for p, c in combinations
+            }
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    all_data.extend(future.result())
+                except Exception as e:
+                    p, c = futures[future]
+                    print(f"  ✗ Ошибка {p['name']} → {c['name_ru']}: {e}")
+                print(f"Прогресс: {completed}/{total}")
+
+        print(f"\nИтого сгенерировано: {len(all_data)} образцов")
         return all_data
+
+    def _load_done_keys(self) -> set:
+        """Возвращает набор уже сгенерированных ключей (для resume)."""
+        done = set()
+        raw_dir = "data/raw"
+        if not os.path.exists(raw_dir):
+            return done
+        for fname in os.listdir(raw_dir):
+            if fname.startswith("batch_") and fname.endswith(".json"):
+                key = fname[len("batch_"):-len(".json")].rsplit("_", 1)[0]
+                done.add(key)
+        return done
 
     def _save(self, data: List[Dict], suffix: str):
         os.makedirs("data/raw", exist_ok=True)
@@ -166,22 +228,8 @@ if __name__ == "__main__":
         taxonomy_path="data/config/taxonomy.json",
     )
 
-    # Вариант 1: Генерация одного конкретного набора
-    # generator.create_custom_batch(persona_id="C", category_id="tech_issue", count=3)
-    
-    # Вариант 2: Генерация полного датасета (все персоны × все категории)
-    # generator.generate_full_dataset(samples_per_combination=2)
-    
-    # Вариант 3: Пример для тестирования - один образец
-    print("Тестовая генерация одного образца...")
-    test_persona = generator.get_persona_by_id("A")
-    test_category = generator.get_category_by_id("tech_issue")
-    test_sample = generator._generate_ticket(test_persona, test_category)
-    
-    if test_sample:
-        print("\n✓ Тестовый образец сгенерирован:")
-        print(f"Персона: {test_persona['name']}")
-        print(f"Категория: {test_category['name_ru']}")
-        print(f"Текст: {test_sample['ticket_text']}")
-    else:
-        print("✗ Ошибка тестовой генерации")
+    # Полный датасет (все персоны × все категории, параллельно)
+    generator.generate_full_dataset(samples_per_combination=10, max_workers=4)
+
+    # Или только конкретная комбинация:
+    # generator.create_custom_batch(persona_id="C", category_id="tech_issue", count=5)
