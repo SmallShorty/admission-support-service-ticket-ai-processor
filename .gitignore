@@ -36,3 +36,6 @@ desktop.ini
 dist/
 build/
 *.egg-info/
+
+# Claude Code
+CLAUDE.md
