@@ -6,8 +6,11 @@ MAX_SCORE = 310
 CAP_STATUS_RAW = 20
 CAP_STATUS_TOTAL = 23.0
 CONF_FLOOR = 0.70
-WORK_START = 9
-WORK_END = 18
+
+# Working hours used exclusively for w_wait calculation (hours elapsed while staff is on duty).
+# These are NOT the recalculation schedule window — see Settings.RECALC_HOUR_START/END in config.py.
+WORK_START = 9   # 09:00 UTC
+WORK_END = 18    # 18:00 UTC
 
 CATEGORY_WEIGHTS: dict[str, float] = {
     "TECHNICAL_ISSUES": 70.0,

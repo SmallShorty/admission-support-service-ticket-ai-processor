@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     USE_FINE_TUNED_MODEL: bool = False
     FINE_TUNED_MODEL_PATH: Optional[str] = None  # например, "models/rubert-ticket-classifier"
 
+    # Priority recalculation scheduler.
+    # Runs every RECALC_INTERVAL_MINUTES within the RECALC_HOUR_START–RECALC_HOUR_END window.
+    # Times are interpreted in RECALC_TIMEZONE (IANA tz name).
+    # HARDCODED DEFAULT: 10:00–18:00 Moscow time, every 30 minutes.
+    RECALC_INTERVAL_MINUTES: int = 30
+    RECALC_HOUR_START: int = 10   # inclusive, local time
+    RECALC_HOUR_END: int = 18     # exclusive, local time
+    RECALC_TIMEZONE: str = "Europe/Moscow"
+
+    # Nest.js endpoint that returns open tickets for priority recalculation.
+    NEST_API_RECALC_ENDPOINT: str = "/api/tickets/open"
+
     # Настройки логирования
     LOG_LEVEL: str = "INFO"
     ENABLE_QUEUE_METRICS: bool = True

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import warnings
 from fastapi import FastAPI
@@ -5,6 +6,7 @@ from src.api.routes import routers
 from src.api.middleware import setup_cors
 from src.core.config import settings
 from src.core.queues import classification_queue
+from src.core.scheduler import priority_scheduler_loop
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -36,14 +38,25 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+_scheduler_task: asyncio.Task | None = None
+
+
 @app.on_event("startup")
 async def on_startup():
+    global _scheduler_task
     await classification_queue.start()
+    _scheduler_task = asyncio.create_task(priority_scheduler_loop())
     logger.info("Application startup sequence completed.")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except asyncio.CancelledError:
+            pass
     await classification_queue.stop()
     logger.info("Application shutdown sequence completed.")
 
