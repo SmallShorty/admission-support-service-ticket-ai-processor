@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\projects\\\\Admission Support Service\\\\ticket-ai-processor\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Head -100)"
+    ]
+  }
+}

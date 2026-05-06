@@ -1,6 +1,5 @@
 import logging
 from fastapi.middleware.cors import CORSMiddleware
-from src.core.config import settings
 
 logger = logging.getLogger("api.middleware")
 
@@ -12,9 +11,11 @@ def setup_cors(app):
     """
     logger.info("Configuring CORS policy...")
 
-    # Origins that are allowed to make cross-site HTTP requests
     origins = [
-        str(origin).strip().rstrip("/") for origin in settings.BACKEND_CORS_ORIGINS
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3005",
+        "http://127.0.0.1:3005",
     ]
 
     app.add_middleware(

@@ -102,7 +102,7 @@ class Settings(BaseSettings):
         return f"{self.NEST_API_BASE_URL}{self.NEST_API_BATCH_ENDPOINT}"
 
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).parent.parent.parent / ".env"
         extra = "ignore"
 
 

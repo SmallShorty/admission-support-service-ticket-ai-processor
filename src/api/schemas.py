@@ -47,6 +47,28 @@ class StudentStatus(BaseModel):
         return v
 
 
+class ProcessRequest(BaseModel):
+    snils: str = Field(..., min_length=3, max_length=20)
+    text: str = Field(..., min_length=5, max_length=1000)
+
+
+class ApplicantInfo(BaseModel):
+    id: str
+    firstName: str
+    lastName: str
+    patronymic: Optional[str] = None
+    email: Optional[str] = None
+    is_fallback: bool = False
+
+
+class ProcessResponse(BaseModel):
+    category: AdmissionIntentCategory
+    confidence: float
+    priority: float
+    breakdown: dict
+    applicant: ApplicantInfo
+
+
 class PriorityRequest(BaseModel):
     category: AdmissionIntentCategory = Field(..., description="Category from AdmissionIntentCategory enum")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Model confidence score (0–1)")

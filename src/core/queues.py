@@ -66,12 +66,12 @@ class ClassificationQueue(BatchQueue):
             # Обрабатываем только тексты, которых нет в кэше
             batch_results = []
             if texts_to_process:
-                # Используем существующий классификатор для пакетной обработки
-                # В текущей реализации model_instance.predict обрабатывает по одному тексту
-                # В будущем можно оптимизировать для пакетной обработки
+                loop = asyncio.get_event_loop()
                 for text in texts_to_process:
                     try:
-                        result = model_instance.predict(text)
+                        result = await loop.run_in_executor(
+                            None, model_instance.predict, text
+                        )
                         batch_results.append(result)
 
                         # Кэшируем результат
