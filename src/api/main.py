@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import warnings
+import httpx
 from fastapi import FastAPI
 from src.api.routes import routers
 from src.api.middleware import setup_cors
@@ -12,6 +13,29 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("api_main")
+
+
+async def _check_ollama() -> dict:
+    # proxy=None обязателен — Proxifier перехватывает localhost и возвращает ошибку
+    try:
+        async with httpx.AsyncClient(proxy=None, timeout=3.0) as client:
+            resp = await client.get(f"{settings.OLLAMA_BASE_URL}/api/tags")
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+            model_present = any(
+                m == settings.OLLAMA_MODEL or m.startswith(settings.OLLAMA_MODEL + ":")
+                for m in models
+            )
+            return {
+                "status": "ok",
+                "url": settings.OLLAMA_BASE_URL,
+                "model": settings.OLLAMA_MODEL,
+                "model_available": model_present,
+            }
+    except httpx.ConnectError:
+        return {"status": "unreachable", "url": settings.OLLAMA_BASE_URL, "model": settings.OLLAMA_MODEL}
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "url": settings.OLLAMA_BASE_URL, "model": settings.OLLAMA_MODEL}
 
 
 def create_app() -> FastAPI:
@@ -30,7 +54,12 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["System"])
     async def health_check():
-        return {"status": "active", "service": settings.PROJECT_NAME}
+        ollama_status = await _check_ollama()
+        return {
+            "status": "active",
+            "service": settings.PROJECT_NAME,
+            "ollama": ollama_status,
+        }
 
     return app
 

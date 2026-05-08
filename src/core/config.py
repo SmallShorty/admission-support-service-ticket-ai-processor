@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # Nest.js endpoint that returns open tickets for priority recalculation.
     NEST_API_RECALC_ENDPOINT: str = "/api/tickets/open"
 
+    # Ollama (локальный LLM для генерации датасета)
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "deepseek-r1:7b"
+
     # Настройки логирования
     LOG_LEVEL: str = "INFO"
     ENABLE_QUEUE_METRICS: bool = True

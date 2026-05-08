@@ -4,16 +4,14 @@ import time
 import random
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dotenv import load_dotenv
 import requests
 
-load_dotenv()
-api_key = os.getenv("DEEPSEEK_API_KEY")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:8b")
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 
-# Вариации контекста обращения — варьируют структуру и детали, не тон персоны
 PROMPT_VARIATIONS = [
     "Укажи конкретную дату или дедлайн в тексте обращения.",
     "Упомяни, что абитуриент уже пробовал решить проблему самостоятельно — безуспешно.",
@@ -25,33 +23,23 @@ PROMPT_VARIATIONS = [
 ]
 
 
-class DeepSeekDatasetGenerator:
+class OllamaDatasetGenerator:
     def __init__(self, personas_path: str, taxonomy_path: str):
-        if not api_key:
-            raise ValueError("DEEPSEEK_API_KEY не найден в .env")
-
         self.personas = self._load_json(personas_path)
         self.categories = self._load_json(taxonomy_path)
-
-        self.api_url = "https://api.deepseek.com/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        self.api_url = f"{OLLAMA_BASE_URL}/api/chat"
 
     def _load_json(self, path: str) -> List[Dict]:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def get_persona_by_id(self, persona_id: str) -> Dict:
-        """Явный выбор персоны по ID (A, B, C, D, E)"""
         persona = next((p for p in self.personas if p["id"] == persona_id), None)
         if not persona:
             raise ValueError(f"Персона с ID {persona_id} не найдена")
         return persona
 
     def get_category_by_id(self, category_id: str) -> Dict:
-        """Явный выбор категории по ID (из taxonomy.json)"""
         category = next((c for c in self.categories if c["id"] == category_id), None)
         if not category:
             raise ValueError(f"Категория с ID {category_id} не найдена")
@@ -59,66 +47,59 @@ class DeepSeekDatasetGenerator:
 
     def _generate_ticket(self, persona: Dict, category: Dict) -> Optional[Dict]:
         variation = random.choice(PROMPT_VARIATIONS)
-        prompt = f"""
-        Ты — эксперт Admission Support Service. Напиши текст обращения.
+        prompt = f"""Ты — эксперт Admission Support Service. Напиши текст обращения.
 
-        КТО ПИШЕТ: {persona['name']}
-        ОПИСАНИЕ: {persona['settings']['description']}
-        СТИЛЬ: {persona['settings']['style']}
-        ТОН: {persona['settings']['tone']}
+КТО ПИШЕТ: {persona['name']}
+ОПИСАНИЕ: {persona['settings']['description']}
+СТИЛЬ: {persona['settings']['style']}
+ТОН: {persona['settings']['tone']}
 
-        ТЕМА: {category['name_ru']} ({category['description']})
+ТЕМА: {category['name_ru']} ({category['description']})
 
-        ФОРМАТ ПОДАЧИ: {variation}
+ФОРМАТ ПОДАЧИ: {variation}
 
-        ОГРАНИЧЕНИЯ:
-        - ЗАПРЕЩЕНО: эмодзи, сокращение "ASS".
-        - Язык: Русский.
-        - Не называй категорию прямо.
-        - Текст должен быть реалистичным и соответствовать стилю и тону персоны.
-        - Длина: 2-5 предложений.
+ОГРАНИЧЕНИЯ:
+- ЗАПРЕЩЕНО: эмодзи, сокращение "ASS".
+- Язык: Русский.
+- Не называй категорию прямо.
+- Текст должен быть реалистичным и соответствовать стилю и тону персоны.
+- Длина: 2-5 предложений.
 
-        ВЕРНИ ТОЛЬКО JSON ОБЪЕКТ без дополнительного текста:
-        {{
-            "persona_id": "{persona['id']}",
-            "category_id": "{category['id']}",
-            "ticket_text": "текст обращения здесь"
-        }}
-        """
-        
+ВЕРНИ ТОЛЬКО JSON ОБЪЕКТ без дополнительного текста:
+{{
+    "persona_id": "{persona['id']}",
+    "category_id": "{category['id']}",
+    "ticket_text": "текст обращения здесь"
+}}"""
+
         payload = {
-            "model": "deepseek-chat",
+            "model": OLLAMA_MODEL,
             "messages": [
-                {"role": "system", "content": "Ты эксперт по генерации реалистичных обращений для службы поддержки абитуриентов."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "Ты эксперт по генерации реалистичных обращений для службы поддержки абитуриентов. Отвечай только валидным JSON без лишнего текста.",
+                },
+                {"role": "user", "content": prompt},
             ],
-            "temperature": 0.9,
-            "max_tokens": 500
+            "stream": False,
+            "options": {"temperature": 0.9},
+            "format": "json",
         }
-        
+
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
+                response = requests.post(self.api_url, json=payload, timeout=120)
                 response.raise_for_status()
-
-                content = response.json()["choices"][0]["message"]["content"].strip()
-
-                # Убираем markdown-обёртку ```json ... ```
-                if content.startswith("```"):
-                    content = content.split("```", 2)[1]
-                    if content.startswith("json"):
-                        content = content[4:]
-
-                return json.loads(content.strip())
-            except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code == 429:
-                    wait = RETRY_DELAY * (2 ** attempt)
-                    print(f"  Rate limit, ждём {wait:.0f}с...")
-                    time.sleep(wait)
-                elif attempt < MAX_RETRIES - 1:
+                content = response.json()["message"]["content"].strip()
+                return json.loads(content)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                if attempt < MAX_RETRIES - 1:
+                    print(f"  Ollama недоступен, повтор через {RETRY_DELAY}с...")
                     time.sleep(RETRY_DELAY)
                 else:
-                    print(f"  ✗ HTTP ошибка [{persona['id']}/{category['id']}]: {e}")
+                    print(
+                        f"  ✗ Ollama недоступен [{persona['id']}/{category['id']}]: {e}"
+                    )
                     return None
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
@@ -128,8 +109,9 @@ class DeepSeekDatasetGenerator:
                     return None
         return None
 
-    def create_custom_batch(self, persona_id: str, category_id: str, count: int):
-        """Генерация конкретного набора данных"""
+    def create_custom_batch(
+        self, persona_id: str, category_id: str, count: int
+    ) -> List[Dict]:
         persona = self.get_persona_by_id(persona_id)
         category = self.get_category_by_id(category_id)
 
@@ -142,18 +124,20 @@ class DeepSeekDatasetGenerator:
             sample = self._generate_ticket(persona, category)
             if sample:
                 batch.append(sample)
-                print(f"  {i+1}/{count} ✓ {sample['ticket_text'][:50]}...")
+                print(f"  {i+1}/{count} ✓ {sample['ticket_text'][:60]}...")
             else:
                 print(f"  {i+1}/{count} ✗")
-            time.sleep(0.5)
 
         self._save(batch, f"deepseek_{persona_id}_{category_id}")
         return batch
 
-    def generate_full_dataset(self, samples_per_combination: int = 10, max_workers: int = 4) -> List[Dict]:
+    def generate_full_dataset(
+        self, samples_per_combination: int = 10, max_workers: int = 2
+    ) -> List[Dict]:
         """
-        Генерация полного датасета параллельно.
+        Генерация полного датасета.
         Поддерживает resume — пропускает уже сгенерированные комбинации.
+        max_workers — параллельные потоки (не больше 2-4 для локального Ollama).
         """
         combinations = [
             (persona, category)
@@ -162,6 +146,7 @@ class DeepSeekDatasetGenerator:
         ]
         total = len(combinations)
         done_keys = self._load_done_keys()
+        print(f"Модель: {OLLAMA_MODEL} @ {OLLAMA_BASE_URL}")
         print(f"Всего комбинаций: {total} ({total * samples_per_combination} образцов)")
         print(f"Уже готово: {len(done_keys)}, осталось: {total - len(done_keys)}")
 
@@ -176,17 +161,17 @@ class DeepSeekDatasetGenerator:
                 sample = self._generate_ticket(persona, category)
                 if sample:
                     results.append(sample)
-                time.sleep(0.3)
             if results:
                 self._save(results, key)
             status = f"{len(results)}/{samples_per_combination}"
-            print(f"  {'✓' if results else '✗'} {persona['name']} → {category['name_ru']}: {status}")
+            print(
+                f"  {'✓' if results else '✗'} {persona['name']} → {category['name_ru']}: {status}"
+            )
             return results
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(generate_combo, p, c): (p, c)
-                for p, c in combinations
+                executor.submit(generate_combo, p, c): (p, c) for p, c in combinations
             }
             completed = 0
             for future in as_completed(futures):
@@ -202,14 +187,13 @@ class DeepSeekDatasetGenerator:
         return all_data
 
     def _load_done_keys(self) -> set:
-        """Возвращает набор уже сгенерированных ключей (для resume)."""
         done = set()
         raw_dir = "data/raw"
         if not os.path.exists(raw_dir):
             return done
         for fname in os.listdir(raw_dir):
             if fname.startswith("batch_") and fname.endswith(".json"):
-                key = fname[len("batch_"):-len(".json")].rsplit("_", 1)[0]
+                key = fname[len("batch_") : -len(".json")].rsplit("_", 1)[0]
                 done.add(key)
         return done
 
@@ -218,18 +202,17 @@ class DeepSeekDatasetGenerator:
         path = f"data/raw/batch_{suffix}_{int(time.time())}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"\n✓ Сохранено {len(data)} записей в {path}")
+        print(f"  Сохранено {len(data)} записей → {path}")
 
 
-# --- ПРИМЕР ИСПОЛЬЗОВАНИЯ В КОДЕ ---
 if __name__ == "__main__":
-    generator = DeepSeekDatasetGenerator(
+    generator = OllamaDatasetGenerator(
         personas_path="data/config/personas.json",
         taxonomy_path="data/config/taxonomy.json",
     )
 
-    # Полный датасет (все персоны × все категории, параллельно)
-    generator.generate_full_dataset(samples_per_combination=10, max_workers=4)
+    # Полный датасет (все персоны × все категории)
+    generator.generate_full_dataset(samples_per_combination=10, max_workers=2)
 
     # Или только конкретная комбинация:
-    # generator.create_custom_batch(persona_id="C", category_id="tech_issue", count=5)
+    # generator.create_custom_batch(persona_id="A", category_id="tech_issue", count=5)
