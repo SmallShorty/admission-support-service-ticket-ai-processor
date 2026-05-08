@@ -2,6 +2,7 @@ import os
 import json
 import time
 import random
+from pathlib import Path
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -11,6 +12,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:8b")
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+
+# Сохранять промежуточный батч каждые N образцов — защита от падения
+SAVE_EVERY = 5
+
+RAW_DIR = Path("data/raw")
 
 PROMPT_VARIATIONS = [
     "Укажи конкретную дату или дедлайн в тексте обращения.",
@@ -44,6 +50,21 @@ class OllamaDatasetGenerator:
         if not category:
             raise ValueError(f"Категория с ID {category_id} не найдена")
         return category
+
+    def _count_existing_samples(self, key: str) -> int:
+        """Считает суммарное количество образцов во всех файлах для данного ключа."""
+        if not RAW_DIR.exists():
+            return 0
+        count = 0
+        for path in RAW_DIR.glob(f"batch_{key}_*.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    count += len(data)
+            except Exception:
+                pass
+        return count
 
     def _generate_ticket(self, persona: Dict, category: Dict) -> Optional[Dict]:
         variation = random.choice(PROMPT_VARIATIONS)
@@ -97,9 +118,7 @@ class OllamaDatasetGenerator:
                     print(f"  Ollama недоступен, повтор через {RETRY_DELAY}с...")
                     time.sleep(RETRY_DELAY)
                 else:
-                    print(
-                        f"  ✗ Ollama недоступен [{persona['id']}/{category['id']}]: {e}"
-                    )
+                    print(f"  ✗ Ollama недоступен [{persona['id']}/{category['id']}]: {e}")
                     return None
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
@@ -109,35 +128,34 @@ class OllamaDatasetGenerator:
                     return None
         return None
 
-    def create_custom_batch(
-        self, persona_id: str, category_id: str, count: int
-    ) -> List[Dict]:
+    def _save(self, data: List[Dict], key: str):
+        RAW_DIR.mkdir(parents=True, exist_ok=True)
+        path = RAW_DIR / f"batch_{key}_{int(time.time())}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"    Сохранено {len(data)} → {path.name}")
+
+    def create_custom_batch(self, persona_id: str, category_id: str, count: int) -> List[Dict]:
         persona = self.get_persona_by_id(persona_id)
         category = self.get_category_by_id(category_id)
+        key = f"deepseek_{persona_id}_{category_id}"
 
-        batch = []
-        print(
-            f"Запуск: {count} заявок от '{persona['name']}' по теме '{category['name_ru']}'"
-        )
+        existing = self._count_existing_samples(key)
+        remaining = count - existing
+        if remaining <= 0:
+            print(f"Уже есть {existing}/{count} образцов для {persona_id}/{category_id}, пропуск.")
+            return []
 
-        for i in range(count):
-            sample = self._generate_ticket(persona, category)
-            if sample:
-                batch.append(sample)
-                print(f"  {i+1}/{count} ✓ {sample['ticket_text'][:60]}...")
-            else:
-                print(f"  {i+1}/{count} ✗")
+        print(f"Запуск: {remaining} новых заявок (уже есть {existing}) — '{persona['name']}' → '{category['name_ru']}'")
+        return self._generate_batch(persona, category, key, remaining)
 
-        self._save(batch, f"deepseek_{persona_id}_{category_id}")
-        return batch
-
-    def generate_full_dataset(
-        self, samples_per_combination: int = 10, max_workers: int = 2
-    ) -> List[Dict]:
+    def generate_full_dataset(self, samples_per_combination: int = 10, max_workers: int = 2) -> List[Dict]:
         """
-        Генерация полного датасета.
-        Поддерживает resume — пропускает уже сгенерированные комбинации.
-        max_workers — параллельные потоки (не больше 2-4 для локального Ollama).
+        Генерация полного датасета с равным числом образцов на каждую комбинацию.
+
+        Count-aware resume: считает уже существующие образцы и догенерирует только до цели.
+        Fallback-proof: сохраняет промежуточный результат каждые SAVE_EVERY образцов,
+        поэтому внезапная остановка теряет не более SAVE_EVERY-1 образцов.
         """
         combinations = [
             (persona, category)
@@ -145,33 +163,38 @@ class OllamaDatasetGenerator:
             for category in self.categories
         ]
         total = len(combinations)
-        done_keys = self._load_done_keys()
+
+        counts = {
+            f"deepseek_{p['id']}_{c['id']}": self._count_existing_samples(f"deepseek_{p['id']}_{c['id']}")
+            for p, c in combinations
+        }
+        done = sum(1 for v in counts.values() if v >= samples_per_combination)
+        total_existing = sum(counts.values())
+
         print(f"Модель: {OLLAMA_MODEL} @ {OLLAMA_BASE_URL}")
-        print(f"Всего комбинаций: {total} ({total * samples_per_combination} образцов)")
-        print(f"Уже готово: {len(done_keys)}, осталось: {total - len(done_keys)}")
+        print(f"Цель: {samples_per_combination} образцов на комбинацию")
+        print(f"Комбинаций: {total} | Завершено: {done} | Уже сгенерировано: {total_existing}")
+        print(f"Осталось сгенерировать: {max(0, total * samples_per_combination - total_existing)}")
 
         all_data: List[Dict] = []
 
         def generate_combo(persona: Dict, category: Dict) -> List[Dict]:
             key = f"deepseek_{persona['id']}_{category['id']}"
-            if key in done_keys:
+            existing = counts[key]
+            remaining = samples_per_combination - existing
+            if remaining <= 0:
                 return []
-            results = []
-            for _ in range(samples_per_combination):
-                sample = self._generate_ticket(persona, category)
-                if sample:
-                    results.append(sample)
-            if results:
-                self._save(results, key)
-            status = f"{len(results)}/{samples_per_combination}"
-            print(
-                f"  {'✓' if results else '✗'} {persona['name']} → {category['name_ru']}: {status}"
-            )
-            return results
+            label = f"{persona['name']} → {category['name_ru']}"
+            print(f"  [{label}] существует {existing}, генерируем {remaining}...")
+            result = self._generate_batch(persona, category, key, remaining)
+            status = f"{existing + len(result)}/{samples_per_combination}"
+            print(f"  {'✓' if result else '✗'} {label}: итого {status}")
+            return result
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(generate_combo, p, c): (p, c) for p, c in combinations
+                executor.submit(generate_combo, p, c): (p, c)
+                for p, c in combinations
             }
             completed = 0
             for future in as_completed(futures):
@@ -183,26 +206,30 @@ class OllamaDatasetGenerator:
                     print(f"  ✗ Ошибка {p['name']} → {c['name_ru']}: {e}")
                 print(f"Прогресс: {completed}/{total}")
 
-        print(f"\nИтого сгенерировано: {len(all_data)} образцов")
+        print(f"\nНовых образцов сгенерировано: {len(all_data)}")
         return all_data
 
-    def _load_done_keys(self) -> set:
-        done = set()
-        raw_dir = "data/raw"
-        if not os.path.exists(raw_dir):
-            return done
-        for fname in os.listdir(raw_dir):
-            if fname.startswith("batch_") and fname.endswith(".json"):
-                key = fname[len("batch_") : -len(".json")].rsplit("_", 1)[0]
-                done.add(key)
-        return done
+    def _generate_batch(self, persona: Dict, category: Dict, key: str, count: int) -> List[Dict]:
+        """
+        Генерирует `count` образцов с промежуточным сохранением каждые SAVE_EVERY штук.
+        При падении уже сохранённые образцы не теряются.
+        """
+        results = []
+        buffer = []
 
-    def _save(self, data: List[Dict], suffix: str):
-        os.makedirs("data/raw", exist_ok=True)
-        path = f"data/raw/batch_{suffix}_{int(time.time())}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"  Сохранено {len(data)} записей → {path}")
+        for i in range(count):
+            sample = self._generate_ticket(persona, category)
+            if sample:
+                results.append(sample)
+                buffer.append(sample)
+                if len(buffer) >= SAVE_EVERY:
+                    self._save(buffer, key)
+                    buffer = []
+
+        if buffer:
+            self._save(buffer, key)
+
+        return results
 
 
 if __name__ == "__main__":
@@ -215,4 +242,4 @@ if __name__ == "__main__":
     generator.generate_full_dataset(samples_per_combination=10, max_workers=2)
 
     # Или только конкретная комбинация:
-    # generator.create_custom_batch(persona_id="A", category_id="tech_issue", count=5)
+    # generator.create_custom_batch(persona_id="F", category_id="tech_issue", count=10)
