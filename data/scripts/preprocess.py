@@ -62,7 +62,7 @@ def stratified_split(
     rng = random.Random(seed)
     by_category: dict[str, list] = defaultdict(list)
     for s in samples:
-        by_category[s["category_id"]].append(s)
+        by_category[s["category"]].append(s)
 
     train, val, test = [], [], []
     for items in by_category.values():
@@ -87,11 +87,13 @@ def encode_labels(samples: list[dict], label_map: dict[str, int]) -> list[dict]:
         if cat not in label_map:
             print(f"  Пропущена неизвестная категория: {cat!r}")
             continue
-        result.append({
-            "text": s["ticket_text"].strip(),
-            "label": label_map[cat],
-            "category": cat,
-        })
+        result.append(
+            {
+                "text": s["ticket_text"].strip(),
+                "label": label_map[cat],
+                "category": cat,
+            }
+        )
     return result
 
 
@@ -137,6 +139,7 @@ def main():
 
     # Статистика по категориям
     from collections import Counter
+
     counts = Counter(s["category"] for s in encoded)
     print("\nРаспределение по категориям:")
     for cat, n in sorted(counts.items(), key=lambda x: -x[1]):

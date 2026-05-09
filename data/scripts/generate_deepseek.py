@@ -2,6 +2,7 @@ import os
 import json
 import time
 import random
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,6 +18,13 @@ RETRY_DELAY = 2.0
 SAVE_EVERY = 5
 
 RAW_DIR = Path("data/raw")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-5s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("generate")
 
 PROMPT_VARIATIONS = [
     "Укажи конкретную дату или дедлайн в тексте обращения.",
@@ -51,6 +59,21 @@ class OllamaDatasetGenerator:
             raise ValueError(f"Категория с ID {category_id} не найдена")
         return category
 
+    def _check_ollama_connection(self):
+        url = f"{OLLAMA_BASE_URL}/api/tags"
+        try:
+            resp = requests.get(url, timeout=5, proxies={"http": None, "https": None})
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+            if OLLAMA_MODEL in models:
+                log.info("Ollama: подключение OK | модель %s доступна", OLLAMA_MODEL)
+            else:
+                log.warning("Ollama: подключение OK | модель %s НЕ НАЙДЕНА | доступны: %s", OLLAMA_MODEL, ", ".join(models))
+        except requests.ConnectionError:
+            log.error("Ollama: недоступна по адресу %s — генерация завершится ошибками", OLLAMA_BASE_URL)
+        except Exception as e:
+            log.error("Ollama: ошибка проверки: %s", e)
+
     def _count_existing_samples(self, key: str) -> int:
         """Считает суммарное количество образцов во всех файлах для данного ключа."""
         if not RAW_DIR.exists():
@@ -68,30 +91,12 @@ class OllamaDatasetGenerator:
 
     def _generate_ticket(self, persona: Dict, category: Dict) -> Optional[Dict]:
         variation = random.choice(PROMPT_VARIATIONS)
-        prompt = f"""Ты — эксперт Admission Support Service. Напиши текст обращения.
-
-КТО ПИШЕТ: {persona['name']}
-ОПИСАНИЕ: {persona['settings']['description']}
-СТИЛЬ: {persona['settings']['style']}
-ТОН: {persona['settings']['tone']}
-
-ТЕМА: {category['name_ru']} ({category['description']})
-
-ФОРМАТ ПОДАЧИ: {variation}
-
-ОГРАНИЧЕНИЯ:
-- ЗАПРЕЩЕНО: эмодзи, сокращение "ASS".
-- Язык: Русский.
-- Не называй категорию прямо.
-- Текст должен быть реалистичным и соответствовать стилю и тону персоны.
-- Длина: 2-5 предложений.
-
-ВЕРНИ ТОЛЬКО JSON ОБЪЕКТ без дополнительного текста:
-{{
-    "persona_id": "{persona['id']}",
-    "category_id": "{category['id']}",
-    "ticket_text": "текст обращения здесь"
-}}"""
+        prompt = f"""Напиши обращение абитуриента в приёмную комиссию.
+Персона: {persona['settings']['description']} Стиль: {persona['settings']['style']} Тон: {persona['settings']['tone']}
+Тема: {category['name_ru']} — {category['description']}
+Требование: {variation}
+Правила: 2-5 предложений, без эмодзи, на русском, тему не называй явно.
+Верни JSON: {{"persona_id": "{persona['id']}", "category_id": "{category['id']}", "ticket_text": "..."}}"""
 
         payload = {
             "model": OLLAMA_MODEL,
@@ -103,28 +108,36 @@ class OllamaDatasetGenerator:
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0.9},
+            "think": False,
+            "options": {
+                "temperature": 0.9,
+                "num_ctx": 1024,
+            },
             "format": "json",
         }
 
         for attempt in range(MAX_RETRIES):
             try:
-                response = requests.post(self.api_url, json=payload, timeout=120)
+                response = requests.post(self.api_url, json=payload, timeout=120,
+                                        proxies={"http": None, "https": None})
                 response.raise_for_status()
                 content = response.json()["message"]["content"].strip()
+                if not content:
+                    log.warning("Пустой ответ от модели [%s/%s], повтор...", persona['id'], category['id'])
+                    time.sleep(RETRY_DELAY)
+                    continue
                 return json.loads(content)
             except (requests.ConnectionError, requests.Timeout) as e:
                 if attempt < MAX_RETRIES - 1:
-                    print(f"  Ollama недоступен, повтор через {RETRY_DELAY}с...")
                     time.sleep(RETRY_DELAY)
                 else:
-                    print(f"  ✗ Ollama недоступен [{persona['id']}/{category['id']}]: {e}")
+                    log.error("Ollama недоступен [%s/%s]: %s", persona['id'], category['id'], e)
                     return None
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
                 else:
-                    print(f"  ✗ Ошибка [{persona['id']}/{category['id']}]: {e}")
+                    log.error("Ошибка генерации [%s/%s]: %s", persona['id'], category['id'], e)
                     return None
         return None
 
@@ -133,7 +146,7 @@ class OllamaDatasetGenerator:
         path = RAW_DIR / f"batch_{key}_{int(time.time())}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"    Сохранено {len(data)} → {path.name}")
+        log.info("Сохранено %d образцов → %s", len(data), path.name)
 
     def create_custom_batch(self, persona_id: str, category_id: str, count: int) -> List[Dict]:
         persona = self.get_persona_by_id(persona_id)
@@ -143,10 +156,10 @@ class OllamaDatasetGenerator:
         existing = self._count_existing_samples(key)
         remaining = count - existing
         if remaining <= 0:
-            print(f"Уже есть {existing}/{count} образцов для {persona_id}/{category_id}, пропуск.")
+            log.info("Уже есть %d/%d образцов для %s/%s, пропуск.", existing, count, persona_id, category_id)
             return []
 
-        print(f"Запуск: {remaining} новых заявок (уже есть {existing}) — '{persona['name']}' → '{category['name_ru']}'")
+        log.info("Запуск: %d новых (уже есть %d) — %s → %s", remaining, existing, persona['name'], category['name_ru'])
         return self._generate_batch(persona, category, key, remaining)
 
     def generate_full_dataset(self, samples_per_combination: int = 10, max_workers: int = 2) -> List[Dict]:
@@ -171,10 +184,11 @@ class OllamaDatasetGenerator:
         done = sum(1 for v in counts.values() if v >= samples_per_combination)
         total_existing = sum(counts.values())
 
-        print(f"Модель: {OLLAMA_MODEL} @ {OLLAMA_BASE_URL}")
-        print(f"Цель: {samples_per_combination} образцов на комбинацию")
-        print(f"Комбинаций: {total} | Завершено: {done} | Уже сгенерировано: {total_existing}")
-        print(f"Осталось сгенерировать: {max(0, total * samples_per_combination - total_existing)}")
+        log.info("Модель: %s @ %s", OLLAMA_MODEL, OLLAMA_BASE_URL)
+        log.info("Цель: %d образцов на комбинацию", samples_per_combination)
+        log.info("Комбинаций: %d | Завершено: %d | Уже есть: %d | Осталось: %d",
+                 total, done, total_existing, max(0, total * samples_per_combination - total_existing))
+        self._check_ollama_connection()
 
         all_data: List[Dict] = []
 
@@ -183,12 +197,15 @@ class OllamaDatasetGenerator:
             existing = counts[key]
             remaining = samples_per_combination - existing
             if remaining <= 0:
+                log.info("Пропуск: %s → %s  (уже %d/%d)", persona['name'], category['name_ru'], existing, samples_per_combination)
                 return []
             label = f"{persona['name']} → {category['name_ru']}"
-            print(f"  [{label}] существует {existing}, генерируем {remaining}...")
+            log.info("Старт: %s  (есть %d, нужно %d)", label, existing, remaining)
+            t0 = time.monotonic()
             result = self._generate_batch(persona, category, key, remaining)
-            status = f"{existing + len(result)}/{samples_per_combination}"
-            print(f"  {'✓' if result else '✗'} {label}: итого {status}")
+            elapsed = time.monotonic() - t0
+            total_now = existing + len(result)
+            log.info("Готово: %s  %d/%d  (%.1fс)", label, total_now, samples_per_combination, elapsed)
             return result
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -203,10 +220,10 @@ class OllamaDatasetGenerator:
                     all_data.extend(future.result())
                 except Exception as e:
                     p, c = futures[future]
-                    print(f"  ✗ Ошибка {p['name']} → {c['name_ru']}: {e}")
-                print(f"Прогресс: {completed}/{total}")
+                    log.error("Комбинация %s → %s упала: %s", p['name'], c['name_ru'], e)
+                log.info("Прогресс: %d/%d комбинаций", completed, total)
 
-        print(f"\nНовых образцов сгенерировано: {len(all_data)}")
+        log.info("Генерация завершена. Новых образцов: %d", len(all_data))
         return all_data
 
     def _generate_batch(self, persona: Dict, category: Dict, key: str, count: int) -> List[Dict]:
@@ -222,9 +239,12 @@ class OllamaDatasetGenerator:
             if sample:
                 results.append(sample)
                 buffer.append(sample)
+                log.info("  [%s] %d/%d ✓", key, i + 1, count)
                 if len(buffer) >= SAVE_EVERY:
                     self._save(buffer, key)
                     buffer = []
+            else:
+                log.warning("  [%s] %d/%d ✗ пропущен", key, i + 1, count)
 
         if buffer:
             self._save(buffer, key)
